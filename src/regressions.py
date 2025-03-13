@@ -4,6 +4,7 @@ import numpy as np
 import statsmodels.api as sm
 from load_data import load_crsp_index, load_ken_french, load_and_compute_excess_returns
 import matplotlib.pyplot as plt
+from sklearn.cross_decomposition import PLSRegression
 script_dir = os.path.dirname(os.path.abspath(__file__))
 save_path = os.path.join(script_dir, "../reports/plots/")  # Correct relative path
 os.makedirs(save_path, exist_ok=True)
@@ -174,7 +175,7 @@ def run_recursive_forecast(
     dataset_name, 
     weighting="value-weighted", 
     h=1, 
-    start_train_date='1934-02-01', 
+    start_train_date='1930-01-01', 
     end_train_date='1980-01-01',
     end_forecast_date='2011-01-01'
 ):
@@ -274,5 +275,205 @@ def display_results(dataset_label, in_sample_results, recursive_results):
     plt.legend()
     dataset_label_clean = dataset_label.replace(" ", "_").replace("-", "_")
     filename = f"Out_of_Sample_Forecasts_for_{dataset_label_clean}_Portfolio_Data.png"
+    plt.savefig(os.path.join(save_path, filename), dpi=300, bbox_inches='tight')
+    plt.show()
+
+import os
+import pandas as pd
+import numpy as np
+import statsmodels.api as sm
+from load_data import load_crsp_index, load_ken_french, load_and_compute_excess_returns
+import matplotlib.pyplot as plt
+from sklearn.cross_decomposition import PLSRegression
+
+# Create a folder to save plots if it doesn't exist
+script_dir = os.path.dirname(os.path.abspath(__file__))
+save_path = os.path.join(script_dir, "../reports/plots/")
+os.makedirs(save_path, exist_ok=True)
+
+def run_in_sample_pls_sklearn(dataset_name, weighting="BE_FYt-1_to_ME_June_t", h=1, end_date='1980-01-01', n_components=1):
+    """
+    Runs an in-sample predictive regression using scikit-learn's PLSRegression.
+    
+    Steps:
+      1. Loads excess returns and Ken French portfolio data.
+      2. Aligns data by common dates and restricts to the in-sample period (up to end_date).
+      3. Fits a PLSRegression model (with n_components) on the full in-sample data.
+      4. Transforms the predictors to obtain the PLS factor (stored in a DataFrame with column "F").
+      5. Runs an OLS regression: excess return ~ 1 + PLS factor.
+    
+    Returns:
+        A dictionary with:
+          - 'pls_model': the fitted PLSRegression object.
+          - 'ols_model': the predictive OLS model fitted on the extracted factor.
+          - 'factor': the extracted factor as a DataFrame with column "F".
+          - 'X': the aligned Ken French data (predictors).
+          - 'y_excess': the aligned excess return series.
+    """
+    # Compute excess returns
+    y_excess = load_and_compute_excess_returns()
+    
+    # Load Ken French portfolio data
+    ken_df = load_ken_french(dataset_name, weighting)
+    if "Date" in ken_df.columns:
+        ken_df["Date"] = pd.to_datetime(ken_df["Date"])
+        ken_df = ken_df.set_index("Date")
+    X = ken_df.apply(pd.to_numeric, errors='coerce')
+    
+    # Align data by common dates and restrict to in-sample period
+    common_dates = X.index.intersection(y_excess.index)
+    if common_dates.empty:
+        raise ValueError("No common dates found between Ken French data and excess returns.")
+    X = X.loc[common_dates]
+    y_excess = y_excess.loc[common_dates]
+    end_date = pd.to_datetime(end_date)
+    X = X[X.index <= end_date]
+    y_excess = y_excess[y_excess.index <= end_date]
+    
+    print(f"[SKLEARN In-Sample] Data from {X.index.min().date()} to {X.index.max().date()} (n = {len(X)})")
+    
+    # Fit PLSRegression on in-sample data
+    pls = PLSRegression(n_components=n_components)
+    pls.fit(X, y_excess)
+    # Extract factor and convert to DataFrame with column 'F'
+    factor = pls.transform(X)  # shape (n_samples, n_components)
+    if n_components == 1:
+        factor = factor.flatten()
+        factor = pd.DataFrame(factor, index=X.index, columns=["F"])
+    else:
+        factor = pd.DataFrame(factor, index=X.index, columns=[f"F{i+1}" for i in range(n_components)])
+    
+    # Run predictive regression
+    X_const = sm.add_constant(factor)
+    ols_model = sm.OLS(y_excess, X_const).fit()
+    
+    print("\n[SKLEARN In-Sample] OLS Regression Summary on PLS Factor:")
+    print(ols_model.summary())
+    
+    return {
+        "pls_model": pls,
+        "ols_model": ols_model,
+        "factor": factor,
+        "X": X,
+        "y_excess": y_excess
+    }
+
+def run_recursive_forecast_sklearn(
+    dataset_name, 
+    weighting="BE_FYt-1_to_ME_June_t", 
+    h=1, 
+    start_train_date='1930-01-01', 
+    end_train_date='1980-01-01',
+    end_forecast_date='2011-01-01',
+    n_components=1
+):
+    """
+    Implements a recursive (expanding window) out-of-sample forecasting procedure using scikit-learn's PLSRegression.
+    
+    For each forecast date from end_train_date to end_forecast_date:
+      1. Use all data up to that forecast date.
+      2. Fit PLSRegression on the training data and extract the PLS factor (as a DataFrame with column 'F').
+      3. Run a predictive OLS regression on the training window.
+      4. Use the last observation of the PLS factor to generate a forecast.
+    
+    Returns:
+        A tuple (forecast_series, actual_series, R2_oos) for the out-of-sample period.
+    """
+    # Compute excess returns
+    y_excess = load_and_compute_excess_returns()
+    
+    ken_df = load_ken_french(dataset_name, weighting)
+    if "Date" in ken_df.columns:
+        ken_df["Date"] = pd.to_datetime(ken_df["Date"])
+        ken_df = ken_df.set_index("Date")
+    X = ken_df.apply(pd.to_numeric, errors='coerce')
+    
+    # Align data
+    common_dates = X.index.intersection(y_excess.index).sort_values()
+    X = X.loc[common_dates]
+    y_excess = y_excess.loc[common_dates]
+    
+    # Restrict to forecast period
+    end_forecast_date = pd.to_datetime(end_forecast_date)
+    X = X[X.index <= end_forecast_date]
+    y_excess = y_excess[y_excess.index <= end_forecast_date]
+    
+    # Fixed training period: use data from start_train_date until end_train_date
+    start_train_date = pd.to_datetime(start_train_date)
+    end_train_date = pd.to_datetime(end_train_date)
+    
+    print(f"[SKLEARN Recursive] Training from {start_train_date.date()} to {end_train_date.date()}, forecasting from {end_train_date.date()} to {end_forecast_date.date()}")
+    
+    forecast_dates = X.loc[end_train_date:].index
+    forecasts = {}
+    actuals = {}
+    
+    for forecast_date in forecast_dates:
+        train_idx = X.index < forecast_date
+        X_train = X.loc[train_idx]
+        y_train = y_excess.loc[train_idx]
+        if len(X_train) < 30:
+            continue
+        
+        # Fit PLSRegression on training data
+        pls = PLSRegression(n_components=n_components)
+        pls.fit(X_train, y_train)
+        factor_train = pls.transform(X_train)
+        if n_components == 1:
+            factor_train = factor_train.flatten()
+            factor_train = pd.DataFrame({'F': factor_train}, index=X_train.index)
+        else:
+            factor_train = pd.DataFrame(factor_train, index=X_train.index, columns=[f"F{i+1}" for i in range(n_components)])
+        
+        # Fit OLS predictive regression on training window
+        X_train_const = sm.add_constant(factor_train, has_constant='add')
+        model = sm.OLS(y_train, X_train_const).fit()
+        
+        # Forecast: use the last observation of the factor from the training window
+        factor_forecast = pls.transform(X_train.iloc[[-1]])
+        if n_components == 1:
+            factor_forecast = factor_forecast.flatten()[0]
+            factor_forecast_df = pd.DataFrame({'F': [factor_forecast]}, index=[X_train.index[-1]])
+        else:
+            factor_forecast_df = pd.DataFrame(factor_forecast, index=[X_train.index[-1]], columns=[f"F{i+1}" for i in range(n_components)])
+        
+        X_curr = sm.add_constant(factor_forecast_df, has_constant='add')
+        forecast_value = model.predict(X_curr)[0]
+        forecasts[forecast_date] = forecast_value
+        if forecast_date in y_excess.index:
+            actuals[forecast_date] = y_excess.loc[forecast_date]
+    
+    forecast_series = pd.Series(forecasts)
+    actual_series = pd.Series(actuals)
+    common = forecast_series.index.intersection(actual_series.index)
+    forecast_series = forecast_series.loc[common]
+    actual_series = actual_series.loc[common]
+    
+    mean_y = y_excess.mean()
+    ss_res = np.sum((actual_series - forecast_series) ** 2)
+    ss_tot = np.sum((actual_series - mean_y) ** 2)
+    R2_oos = 1 - ss_res / ss_tot if ss_tot != 0 else np.nan
+    
+    return forecast_series, actual_series, R2_oos
+
+def display_results_sklearn(dataset_label, in_sample_results, forecast_series, actual_series, R2_oos):
+    """
+    Displays the in-sample OLS regression summary from the PLS predictor, out-of-sample R²,
+    and plots the actual vs. forecasted excess market returns (using the sklearn PLS approach).
+    """
+    print(f"\n{'='*40}\n[SKLEARN] Results for {dataset_label} Portfolio Data\n{'='*40}")
+    print("\n[SKLEARN] Third-Stage In-Sample Regression Summary:")
+    print(in_sample_results["ols_model"].summary())
+    print(f"\n[SKLEARN] Out-of-Sample Predictive R²: {R2_oos:.4f}")
+    
+    plt.figure(figsize=(10, 6))
+    plt.plot(actual_series, label="Actual Excess Market Return")
+    plt.plot(forecast_series, label="Forecasted Excess Market Return", linestyle="--")
+    plt.title(f"[SKLEARN] Out-of-Sample Forecasts for {dataset_label} Portfolio Data")
+    plt.xlabel("Date")
+    plt.ylabel("Excess Market Return")
+    plt.legend()
+    dataset_label_clean = dataset_label.replace(" ", "_").replace("-", "_")
+    filename = f"Out_of_Sample_Forecasts_SKLEARN_for_{dataset_label_clean}_Portfolio_Data.png"
     plt.savefig(os.path.join(save_path, filename), dpi=300, bbox_inches='tight')
     plt.show()

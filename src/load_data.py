@@ -85,6 +85,8 @@ def load_and_compute_excess_returns():
 def load_ken_french(dataset_name="6_Portfolios_2x3", weighting="value-weighted"):
     """
     Load Ken French portfolio data from the Excel file saved by pull_ken_french_data.py.
+    If weighting is 'BE_FYt-1_to_ME_June_t', then shift the date index backward by 7 months 
+    to align the valuation ratio with the time the information is available.
     """
     excel_name = f"{dataset_name.replace('/', '_')}.xlsx"
     excel_path = DATA_DIR / excel_name
@@ -96,10 +98,22 @@ def load_ken_french(dataset_name="6_Portfolios_2x3", weighting="value-weighted")
     elif weighting == "BE_FYt-1_to_ME_June_t":
         sheet_name = "7"
     else:
-        raise ValueError("Invalid weighting: must be 'value-weighted' or 'equal-weighted'.")
+        raise ValueError("Invalid weighting: must be 'value-weighted', 'equal-weighted', or 'BE_FYt-1_to_ME_June_t'.")
 
     df = pd.read_excel(excel_path, sheet_name=sheet_name)
+    
+    # If using the BE_FYt-1_to_ME_June_t measure, shift the dates backward by 7 months 
+    # so that the valuation ratio is aligned with the time it would be available for forecasting.
+    if weighting == "BE_FYt-1_to_ME_June_t":
+        # First, ensure that the date column is datetime and set as the index if it exists.
+        if "Date" in df.columns:
+            df["Date"] = pd.to_datetime(df["Date"])
+            df = df.set_index("Date")
+        # Shift the index by subtracting 7 months
+        df.index = df.index - pd.DateOffset(months=7)
+    
     return df
+
 
 #df_6 = load_ken_french("6_Portfolios_2x3", weighting="value-weighted")
 #df_25 = load_ken_french("25_Portfolios_5x5", weighting="value-weighted")
