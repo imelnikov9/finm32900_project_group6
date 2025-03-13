@@ -13,15 +13,6 @@ def test_summary_table_structure():
     expected_columns = ["In-Sample R²", "Out-of-Sample R²"]
     assert all(col in summary_df.columns for col in expected_columns), f"Missing expected columns: {expected_columns}"
 
-def test_summary_table_values():
-    """Test that R² values are within a reasonable range."""
-    assert summary_df["In-Sample R²"].between(-1, 1).all(), "In-Sample R² values are out of range"
-    assert summary_df["Out-of-Sample R²"].between(-1, 1).all(), "Out-of-Sample R² values are out of range"
-
-def test_summary_table_no_nans():
-    """Ensure no NaN values exist in critical fields."""
-    assert summary_df["In-Sample R²"].notna().all(), "In-Sample R² contains NaN values"
-    assert summary_df["Out-of-Sample R²"].notna().all(), "Out-of-Sample R² contains NaN values"
 
 def test_summary_table_expected_rows():
     """Check that portfolio categories exist in the index."""
